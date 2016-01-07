@@ -1,24 +1,29 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Main where
+
+import           BasePrelude hiding (take, (&), (\\))
+import           Control.Lens hiding ((<.>))
+import           Control.Monad.Except
+import           Data.Aeson.Lens
+import           Data.Attoparsec.Text
+import           Data.Text.Strict.Lens
+import           Network.Linklater hiding (Command)
 import           Rendering
-import           System.Directory (getDirectoryContents, createDirectoryIfMissing)
+
 import           Data.Set ((\\), Set)
 import qualified Data.Set as Set
-import           System.FilePath (dropExtension, (<.>), (</>))
-import qualified Network.Tightrope as TR
-import           Data.Attoparsec.Text
-import           Control.Applicative
-import           Prelude hiding (take, takeWhile)
 import           Data.Text (Text)
 import qualified Data.Text as Text
-import           Data.Char (isSpace)
-import           Network.Wai.Handler.Warp as Warp
-import           Control.Lens ((^.))
-import           Data.Monoid (mconcat)
-import qualified Data.Configurator as Conf
-import qualified Data.UUID.V4 as UUID
 import qualified Data.UUID as UUID
+import qualified Data.UUID.V4 as UUID
+import qualified Network.Linklater as Linklater
+import           Network.Wai.Handler.Warp as Warp
+import qualified Network.Wreq as Wreq
+import           System.Directory (getDirectoryContents, createDirectoryIfMissing)
+import           System.FilePath (dropExtension, (<.>), (</>))
 
 data Command = ListMemes | MakeMeme Meme | AmbiguousSide
 instance Show Command where
@@ -37,7 +42,7 @@ inputParser = parseNothing
         parseComplete = do
           templateName <- parseTemplate
           topText <- takeTill (== ';')
-          take 1
+          _ <- take 1
           bottomText <- takeText
           return $ MakeMeme $ Meme templateName
                                    (Text.toUpper $ Text.strip topText)
@@ -58,52 +63,67 @@ saveMeme localPath meme = do
   filename <- (<.> "png") . UUID.toString <$> UUID.nextRandom
   renderMeme meme (localPath </> filename)
   return filename
-  
-getTemplates :: IO (Set String)
-getTemplates = do
-  files <- getDirectoryContents "templates/"
-  let fileNames = Set.fromList files \\ Set.fromList [".", ".."]
-  return $ Set.map dropExtension fileNames
 
-handler :: MemeBot -> TR.Command -> TR.Slack Text
-handler (MemeBot localPath remotePath) command = do
-  templates <- TR.liftIO getTemplates
-  case parseOnly inputParser (Text.strip $ command ^. TR.text) of
+cleverlyReadFile :: FilePath -> IO Text
+cleverlyReadFile filename =
+  readFile filename <&> (^. (packed . to Text.strip))
+
+configIO :: IO Config
+configIO =
+  Config <$> cleverlyReadFile "memegen.hook"
+
+upload :: FilePath -> IO (Maybe Text)
+upload src = do
+  let params = Wreq.partFileSource "image" src
+  let opts = Wreq.defaults & Wreq.header "Authorization" .~ ["Client-ID " <> imgurID]
+  response <- Wreq.postWith opts "https://api.imgur.com/3/image" params
+  return (response ^? (Wreq.responseBody . key "data" . key "link" . _String))
+  where
+    imgurID = "cf41a92dd376e2f"
+
+bot :: (MonadError String m, MonadIO m) => Linklater.Command -> m Text
+bot (Linklater.Command "meme" (User username) channel (Just query)) = do
+  templates <- liftIO templatesIO
+  case parseOnly inputParser (Text.strip query) of
     Left _ -> return (usageMessage templates)
     Right ListMemes -> return (usageMessage templates)
     Right AmbiguousSide -> return "You gotta put the semicolon somewhere! Otherwise it's ambiguous if it should go on the top or bottom. NO it is not meme-aware get over yourself"
     Right (MakeMeme meme@(Meme templateName _ _))
       | templateName `Set.member` templates -> do
-        let TR.User username = command ^. TR.user
-            pathPrefix = Text.unpack username
-        filename <- TR.liftIO $ do
-          let dir = localPath </> pathPrefix
+        let pathPrefix = Text.unpack username
+        filename <- liftIO $ do
+          let dir = "/tmp/memegen" </> pathPrefix
           createDirectoryIfMissing True dir
           saveMeme dir meme
-
-        let messageText = mconcat ["<"
-                                  , Text.pack (remotePath </> pathPrefix </> filename)
-                                  , "| >"
-                                  ]
-            message = TR.message (TR.Icon "helicopter") "memebot" messageText
-        TR.say message (command ^. TR.source)
-        return ""
+        urlM <- liftIO (upload filename)
+        case urlM of
+          Just url -> do
+            config <- liftIO configIO
+            let formats = [FormatLink url ""]
+            _  <- liftIO $ say (FormattedMessage (EmojiIcon "helicopter") "memebot" channel formats) config
+            return "one .... sec ......"
+          Nothing ->
+            return "something went awry!"
       | otherwise -> return $ Text.append "Unknown template " (Text.pack templateName)
 
-data MemeBot = MemeBot String String
+bot _ =
+  throwError "unrecognized command"
+
+templatesIO :: IO (Set String)
+templatesIO = do
+  files <- getDirectoryContents "templates/"
+  let f = Set.fromList files \\ Set.fromList [".", ".."]
+  let t = Set.map dropExtension f
+  return t
 
 main :: IO ()
 main = do
-  conf <- Conf.load [Conf.Required "conf"]
-  [token, localPath, remotePath, hookPath] <- sequence $
-    Conf.require conf <$> [ "incoming-token"
-                          , "local-path"
-                          , "remote-path"
-                          , "incoming-hook"
-                          ]
-  port <- Conf.require conf "port"
-  let memebot = MemeBot localPath remotePath
-      bot = TR.bot (TR.Account token hookPath) (handler memebot)
-
-  putStrLn $ "Running on port " ++ show port
-  Warp.run port bot
+  port <- (^. unpacked) <$> cleverlyReadFile "memegen.port"
+  putStrLn ("Running on port " <> port)
+  Warp.run (read port) (slashSimple foo)
+  where
+    foo command = do
+      result <- runExceptT (bot command)
+      return (either gussy id result)
+      where
+        gussy t = ("error: " <> t) ^. packed
