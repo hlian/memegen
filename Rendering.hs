@@ -6,7 +6,6 @@ import qualified Graphics.Rendering.Cairo as Cairo
 import           Graphics.Rendering.Pango (PangoLayout, PangoRectangle(..))
 import qualified Graphics.Rendering.Pango as Pango
 import           Data.Text (Text, length, unpack)
-import           Data.Functor ((<$>))
 import           System.FilePath ((<.>), (</>))
 import           Prelude hiding (length)
 import           System.Directory (doesDirectoryExist, getDirectoryContents)
