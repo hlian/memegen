@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
@@ -8,7 +9,7 @@ import           BasePrelude hiding (take, (&), (\\))
 import           Control.Lens hiding ((<.>))
 import           Control.Monad.Except
 import           Data.Aeson.Lens
-import           Data.Attoparsec.Text
+import           Data.Attoparsec.Text hiding (try)
 import           Data.Text.Strict.Lens
 import           Network.Linklater hiding (Command)
 import           Rendering
@@ -68,10 +69,6 @@ cleverlyReadFile :: FilePath -> IO Text
 cleverlyReadFile filename =
   readFile filename <&> (^. (packed . to Text.strip))
 
-configIO :: IO Config
-configIO =
-  Config <$> cleverlyReadFile "memegen.hook"
-
 upload :: FilePath -> IO (Maybe Text)
 upload src = do
   let params = Wreq.partFileSource "image" src
@@ -81,8 +78,8 @@ upload src = do
   where
     imgurID = "cf41a92dd376e2f"
 
-bot :: (MonadError String m, MonadIO m) => Linklater.Command -> m Text
-bot (Linklater.Command "meme" (User username) channel (Just query)) = do
+bot :: (MonadError String m, MonadIO m) => Config -> Linklater.Command -> m Text
+bot config (Linklater.Command "meme" (User username) channel (Just query)) = do
   templates <- liftIO templatesIO
   case parseOnly inputParser (Text.strip query) of
     Left _ -> return (usageMessage templates)
@@ -96,18 +93,22 @@ bot (Linklater.Command "meme" (User username) channel (Just query)) = do
           createDirectoryIfMissing True dir
           saveMeme dir meme
         void . liftIO . forkIO $ do
-          urlM <- liftIO (upload ("/tmp/memegen" </> pathPrefix </> filename))
+          urlM <- liftIO (try $ upload ("/tmp/memegen" </> pathPrefix </> filename))
           case urlM of
-            Just url -> do
-              config <- liftIO configIO
+            Right (Just url) -> do
               let formats = [FormatLink url ""]
-              void . liftIO $ say (FormattedMessage (EmojiIcon "helicopter") "memebot" channel formats) config
-            Nothing ->
+              either <- runExceptT $ say (FormattedMessage (EmojiIcon "helicopter") "memebot" channel formats) config
+              case either of
+                Right _ -> return ()
+                Left e -> print ("say error: " <> show e)
+            Left (e :: SomeException) -> do
+              print e
+            _ ->
               return ()
         return "one .... sec ......"
       | otherwise -> return $ Text.append "Unknown template " (Text.pack templateName)
 
-bot _ =
+bot _ _ =
   throwError "unrecognized command"
 
 templatesIO :: IO (Set String)
@@ -120,11 +121,12 @@ templatesIO = do
 main :: IO ()
 main = do
   port <- (^. unpacked) <$> cleverlyReadFile "memegen.port"
+  hook <- (Config <$> cleverlyReadFile "memegen.hook")
   putStrLn ("Running on port " <> port)
-  Warp.run (read port) (slashSimple foo)
+  Warp.run (read port) (slashSimple $ foo hook)
   where
-    foo command = do
-      result <- runExceptT (bot command)
+    foo hook command = handle (\(e :: SomeException) -> print e >> return "oh dear something bad happened") $ do
+      result <- runExceptT (bot hook command)
       return (either gussy id result)
       where
         gussy t = ("error: " <> t) ^. packed

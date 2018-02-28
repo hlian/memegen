@@ -14,7 +14,7 @@ cabal-version:       >=1.10
 
 executable memegen
   main-is:             Main.hs
-  -- other-modules:
+  other-modules: Rendering
   -- other-extensions:
   build-depends:       attoparsec
                      , base

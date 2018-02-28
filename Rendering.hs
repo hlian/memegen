@@ -1,7 +1,4 @@
-module Rendering (
-  renderMeme,
-  Meme(..)
-) where
+module Rendering where
 import qualified Graphics.Rendering.Cairo as Cairo
 import           Graphics.Rendering.Pango (PangoLayout, PangoRectangle(..))
 import qualified Graphics.Rendering.Pango as Pango
@@ -16,7 +13,7 @@ import qualified Data.List as List
 memeFont :: Double -> IO Pango.FontDescription
 memeFont size = do
   font <- Pango.fontDescriptionNew
-  Pango.fontDescriptionSetFamily font "Impact"
+  Pango.fontDescriptionSetFamily font ("Impact" :: String)
   Pango.fontDescriptionSetSize font size
   return font
 
